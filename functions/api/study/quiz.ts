@@ -1,6 +1,6 @@
 import { Type } from '@google/genai';
 import { PagesFunction, Env } from '../../types';
-import { getGeminiClient, FREE_TIER_MODEL, handleGeminiError } from '../../utils/geminiEdge';
+import { getGeminiClient, generateContentWithRetry, handleGeminiError } from '../../utils/geminiEdge';
 import { checkEdgeRateLimit, createRateLimitResponse, jsonResponse } from '../../utils/rateLimiter';
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -16,7 +16,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     return jsonResponse({ success: false, error: 'Cuerpo de solicitud JSON inválido.' }, 400);
   }
 
-  const { topic, textContext, questionCount = 4, difficulty = 'medio', academicLevel = 'universidad' } = body || {};
+  const { topic, textContext, questionCount = 4, difficulty = 'medio', academicLevel = 'universidad', model } = body || {};
 
   if (!topic && !textContext) {
     return jsonResponse({ success: false, error: 'Se requiere indicar un tema o texto de referencia.' }, 400);
@@ -49,41 +49,44 @@ Requisitos estrictos para cada pregunta:
 - Explicación didáctica completa explicando por qué esa opción es la correcta y qué conceptos aclara.
 - Concepto o subtema clave evaluado.`;
 
-    const response = await ai.models.generateContent({
-      model: FREE_TIER_MODEL,
-      contents: prompt,
-      config: {
-        systemInstruction:
-          'Eres un examinador universitario pedagógico en español. Genera pruebas rigurosas, sin ambigüedades y con explicaciones educativas exhaustivas.',
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            topic: { type: Type.STRING },
-            questions: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  id: { type: Type.STRING },
-                  question: { type: Type.STRING },
-                  options: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: 'Cuatro opciones de respuesta',
+    const { response, usedModel } = await generateContentWithRetry(
+      ai,
+      {
+        contents: prompt,
+        config: {
+          systemInstruction:
+            'Eres un examinador universitario pedagógico en español. Genera pruebas rigurosas, sin ambigüedades y con explicaciones educativas exhaustivas.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              topic: { type: Type.STRING },
+              questions: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    question: { type: Type.STRING },
+                    options: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING },
+                      description: 'Cuatro opciones de respuesta',
+                    },
+                    correctAnswerIndex: { type: Type.INTEGER, description: 'Índice de 0 a 3 de la respuesta correcta' },
+                    explanation: { type: Type.STRING, description: 'Explicación detallada de la respuesta correcta y descartes' },
+                    concept: { type: Type.STRING, description: 'Tema o concepto puntual evaluado' },
                   },
-                  correctAnswerIndex: { type: Type.INTEGER, description: 'Índice de 0 a 3 de la respuesta correcta' },
-                  explanation: { type: Type.STRING, description: 'Explicación detallada de la respuesta correcta y descartes' },
-                  concept: { type: Type.STRING, description: 'Tema o concepto puntual evaluado' },
+                  required: ['question', 'options', 'correctAnswerIndex', 'explanation', 'concept'],
                 },
-                required: ['question', 'options', 'correctAnswerIndex', 'explanation', 'concept'],
               },
             },
+            required: ['topic', 'questions'],
           },
-          required: ['topic', 'questions'],
         },
       },
-    });
+      { preferredModel: model, maxRetries: 2, timeoutMs: 25000 }
+    );
 
     const parsed = JSON.parse(response.text || '{}');
     const questionsWithIds = (parsed.questions || []).map((q: any, idx: number) => ({
@@ -97,6 +100,7 @@ Requisitos estrictos para cada pregunta:
         id: `exam-${Date.now()}`,
         topic: parsed.topic || topic,
         difficulty,
+        usedModel,
         questions: questionsWithIds,
         createdAt: Date.now(),
       },

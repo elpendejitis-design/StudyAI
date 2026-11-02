@@ -1,6 +1,6 @@
 import { Type } from '@google/genai';
 import { PagesFunction, Env } from '../../types';
-import { getGeminiClient, FREE_TIER_MODEL, handleGeminiError } from '../../utils/geminiEdge';
+import { getGeminiClient, generateContentWithRetry, handleGeminiError } from '../../utils/geminiEdge';
 import { checkEdgeRateLimit, createRateLimitResponse, jsonResponse } from '../../utils/rateLimiter';
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -16,7 +16,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     return jsonResponse({ success: false, error: 'Cuerpo de solicitud JSON inválido.' }, 400);
   }
 
-  const { messages, mode = 'paso-a-paso', subject = 'General', academicLevel = 'universidad' } = body || {};
+  const { messages, mode = 'paso-a-paso', subject = 'General', academicLevel = 'universidad', model } = body || {};
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return jsonResponse({ success: false, error: 'Se requiere un historial de mensajes válido.' }, 400);
@@ -79,26 +79,29 @@ Devuelve un JSON con:
       parts: [{ text: m.content }],
     }));
 
-    const response = await ai.models.generateContent({
-      model: FREE_TIER_MODEL,
-      contents: recentMessages,
-      config: {
-        systemInstruction: systemPrompt,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            responseMarkdown: { type: Type.STRING, description: 'La respuesta pedagógica del tutor en formato Markdown' },
-            suggestedFollowUps: {
-              type: Type.ARRAY,
-              description: 'Tres preguntas breves sugeridas para continuar la conversación',
-              items: { type: Type.STRING },
+    const { response, usedModel } = await generateContentWithRetry(
+      ai,
+      {
+        contents: recentMessages,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              responseMarkdown: { type: Type.STRING, description: 'La respuesta pedagógica del tutor en formato Markdown' },
+              suggestedFollowUps: {
+                type: Type.ARRAY,
+                description: 'Tres preguntas breves sugeridas para continuar la conversación',
+                items: { type: Type.STRING },
+              },
             },
+            required: ['responseMarkdown', 'suggestedFollowUps'],
           },
-          required: ['responseMarkdown', 'suggestedFollowUps'],
         },
       },
-    });
+      { preferredModel: model, maxRetries: 2, timeoutMs: 25000 }
+    );
 
     const parsed = JSON.parse(response.text || '{}');
     return jsonResponse({
@@ -111,6 +114,7 @@ Devuelve un JSON con:
         timestamp: Date.now(),
         mode,
         subject,
+        usedModel,
       },
     });
   } catch (error: any) {

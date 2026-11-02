@@ -100,6 +100,9 @@ export const TutorModule: React.FC<TutorModuleProps> = ({ academicLevel, demoMod
     scrollToBottom();
   }, [messages, isLoading]);
 
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-3.8-flash');
+  const [lastUserPrompt, setLastUserPrompt] = useState<string>('');
+
   const handleSendMessage = async (textToSend?: string) => {
     const question = (textToSend || inputQuestion).trim();
     if (!question || isLoading) return;
@@ -111,6 +114,7 @@ export const TutorModule: React.FC<TutorModuleProps> = ({ academicLevel, demoMod
 
     setErrorMsg(null);
     setInputQuestion('');
+    setLastUserPrompt(question);
 
     const userMessage: TutorMessage = {
       id: `user-${Date.now()}`,
@@ -125,25 +129,30 @@ export const TutorModule: React.FC<TutorModuleProps> = ({ academicLevel, demoMod
     setMessages(newMessages);
     setIsLoading(true);
 
-    const apiPayload = newMessages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
+    try {
+      const apiPayload = newMessages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
 
-    const response = await sendTutorMessageApi({
-      messages: apiPayload,
-      mode: selectedMode,
-      subject: selectedSubject,
-      academicLevel,
-      forceDemo: demoMode,
-    });
+      const response = await sendTutorMessageApi({
+        messages: apiPayload,
+        mode: selectedMode,
+        subject: selectedSubject,
+        academicLevel,
+        model: selectedModel,
+        forceDemo: demoMode,
+      });
 
-    setIsLoading(false);
-
-    if (response.success && response.data) {
-      setMessages((prev) => [...prev, response.data!]);
-    } else {
-      setErrorMsg(response.error || 'Ocurrió un error al contactar al tutor.');
+      if (response.success && response.data) {
+        setMessages((prev) => [...prev, response.data!]);
+      } else {
+        setErrorMsg(response.error || 'Ocurrió un error al contactar al tutor.');
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Error de conexión con el Tutor IA.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -185,7 +194,18 @@ export const TutorModule: React.FC<TutorModuleProps> = ({ academicLevel, demoMod
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Model Selector */}
+            <select
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              className="bg-slate-950/80 border border-white/10 rounded-xl px-2.5 py-1.5 text-xs text-indigo-200 focus:outline-hidden focus:border-indigo-500 font-medium"
+              title="Modelo oficial de IA"
+            >
+              <option value="gemini-3.8-flash">gemini-3.8-flash (Recomendado)</option>
+              <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Alta disp.)</option>
+            </select>
+
             {/* Subject Selector */}
             <select
               value={selectedSubject}
@@ -334,19 +354,47 @@ export const TutorModule: React.FC<TutorModuleProps> = ({ academicLevel, demoMod
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Error notification */}
+        {/* Error notification with manual retry */}
         {errorMsg && (
-          <div className="mt-3 p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>{errorMsg}</span>
+          <div className="mt-3 p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-200 text-xs space-y-2">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
+                <span className="leading-relaxed">{errorMsg}</span>
+              </div>
+              <button
+                onClick={() => setErrorMsg(null)}
+                className="text-xs text-rose-400 hover:text-white px-1"
+              >
+                ✕
+              </button>
             </div>
-            <button
-              onClick={() => setErrorMsg(null)}
-              className="text-xs font-semibold underline ml-2"
-            >
-              Cerrar
-            </button>
+            <div className="flex items-center gap-2 pt-1">
+              {lastUserPrompt && (
+                <button
+                  type="button"
+                  onClick={() => handleSendMessage(lastUserPrompt)}
+                  disabled={isLoading}
+                  className="px-3 py-1.5 rounded-lg bg-rose-500/30 hover:bg-rose-500/40 text-rose-100 font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reintentar mensaje</span>
+                </button>
+              )}
+              {selectedModel === 'gemini-3.8-flash' && lastUserPrompt && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedModel('gemini-3.1-flash-lite');
+                    setTimeout(() => handleSendMessage(lastUserPrompt), 50);
+                  }}
+                  disabled={isLoading}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-500/30 hover:bg-indigo-500/40 text-indigo-200 font-semibold transition-colors cursor-pointer"
+                >
+                  Probar con Flash Lite
+                </button>
+              )}
+            </div>
           </div>
         )}
 

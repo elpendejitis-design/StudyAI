@@ -94,6 +94,7 @@ export interface FlashcardDeck {
 export interface UserPreferences {
   academicLevel: AcademicLevel;
   demoMode: boolean; // demo mode toggle
+  preferredModel?: 'gemini-3.8-flash' | 'gemini-3.1-flash-lite';
   dailyGoalCards: number;
   studiedToday: number;
   studyStreakDays: number;
@@ -108,4 +109,6 @@ export interface ApiResponse<T> {
   code?: string;
   retryAfter?: number;
   isDemoFallback?: boolean;
+  canRetry?: boolean;
+  usedModel?: string;
 }

@@ -53,6 +53,8 @@ export const SummarizerModule: React.FC<SummarizerModuleProps> = ({
   const currentChars = inputText.length;
   const isOverLimit = currentChars > MAX_CHARS;
 
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-3.8-flash');
+
   const handleSummarize = async () => {
     if (!inputText.trim()) {
       setErrorMsg('Por favor ingresa o pega un texto para resumir.');
@@ -67,26 +69,30 @@ export const SummarizerModule: React.FC<SummarizerModuleProps> = ({
     setIsLoading(true);
     setSaved(false);
 
-    const resp = await generateSummaryApi({
-      text: inputText,
-      level: summaryLevel,
-      focus: focusArea,
-      academicLevel,
-      forceDemo: demoMode,
-    });
-
-    setIsLoading(false);
-
-    if (resp.success && resp.data) {
-      setResult(resp.data);
-      // Automatically open all sections
-      const sectionsMap: Record<number, boolean> = {};
-      resp.data.structuredSections.forEach((_, idx) => {
-        sectionsMap[idx] = true;
+    try {
+      const resp = await generateSummaryApi({
+        text: inputText,
+        level: summaryLevel,
+        focus: focusArea,
+        academicLevel,
+        model: selectedModel,
+        forceDemo: demoMode,
       });
-      setOpenSections(sectionsMap);
-    } else {
-      setErrorMsg(resp.error || 'No se pudo generar el resumen estructurado.');
+
+      if (resp.success && resp.data) {
+        setResult(resp.data);
+        const sectionsMap: Record<number, boolean> = {};
+        resp.data.structuredSections.forEach((_, idx) => {
+          sectionsMap[idx] = true;
+        });
+        setOpenSections(sectionsMap);
+      } else {
+        setErrorMsg(resp.error || 'No se pudo generar el resumen estructurado.');
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Error inesperado durante la solicitud.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -220,28 +226,70 @@ ${result.reflectionQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
               </div>
             </div>
 
-            {/* Focus Area */}
-            <div>
-              <label className="text-xs font-semibold text-slate-300 block mb-2">
-                Enfoque Analítico
-              </label>
-              <select
-                value={focusArea}
-                onChange={(e) => setFocusArea(e.target.value)}
-                className="w-full bg-slate-950/80 border border-white/10 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-hidden focus:border-indigo-500"
-              >
-                <option value="Conceptos clave y aplicaciones">Conceptos clave y aplicaciones prácticas</option>
-                <option value="Causa, desarrollo y consecuencias">Relación causa-efecto y cronología</option>
-                <option value="Preparación de examen tipo test">Enfoque para examen y memorización</option>
-                <option value="Fórmulas y resolución teórica">Teoría profunda y principios</option>
-              </select>
+            {/* Focus Area & Model Selector */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1.5">
+                  Enfoque Analítico
+                </label>
+                <select
+                  value={focusArea}
+                  onChange={(e) => setFocusArea(e.target.value)}
+                  className="w-full bg-slate-950/80 border border-white/10 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-hidden focus:border-indigo-500"
+                >
+                  <option value="Conceptos clave y aplicaciones">Conceptos clave y aplicaciones</option>
+                  <option value="Causa, desarrollo y consecuencias">Causa-efecto y cronología</option>
+                  <option value="Preparación de examen tipo test">Enfoque para examen</option>
+                  <option value="Fórmulas y resolución teórica">Teoría profunda y principios</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1.5">
+                  Modelo IA (Nivel Gratuito)
+                </label>
+                <select
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  className="w-full bg-slate-950/80 border border-white/10 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-hidden focus:border-indigo-500"
+                >
+                  <option value="gemini-3.8-flash">gemini-3.8-flash (Recomendado)</option>
+                  <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Alta disponibilidad)</option>
+                </select>
+              </div>
             </div>
 
-            {/* Error Message */}
+            {/* Error Message with Manual Retry */}
             {errorMsg && (
-              <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>{errorMsg}</span>
+              <div className="p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-200 text-xs space-y-2">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
+                  <span className="leading-relaxed flex-1">{errorMsg}</span>
+                </div>
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={handleSummarize}
+                    disabled={isLoading}
+                    className="px-3 py-1.5 rounded-lg bg-rose-500/30 hover:bg-rose-500/40 text-rose-100 font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Reintentar ahora</span>
+                  </button>
+                  {selectedModel === 'gemini-3.8-flash' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedModel('gemini-3.1-flash-lite');
+                        setTimeout(() => handleSummarize(), 50);
+                      }}
+                      disabled={isLoading}
+                      className="px-3 py-1.5 rounded-lg bg-indigo-500/30 hover:bg-indigo-500/40 text-indigo-200 font-semibold transition-colors cursor-pointer"
+                    >
+                      Probar con Flash Lite
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 

@@ -125,6 +125,8 @@ export const FlashcardsModule: React.FC<FlashcardsModuleProps> = ({
     setShowHint(false);
   };
 
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-3.8-flash');
+
   const handleGenerateDeck = async () => {
     if (!newTopic.trim() && !newTextContext.trim()) {
       setErrorMsg('Ingresa un tema o contenido para generar el mazo.');
@@ -134,29 +136,34 @@ export const FlashcardsModule: React.FC<FlashcardsModuleProps> = ({
     setErrorMsg(null);
     setIsGenerating(true);
 
-    const resp = await generateFlashcardsApi({
-      topic: newTopic || 'Conceptos de Estudio',
-      textContext: newTextContext || undefined,
-      count: cardCount,
-      academicLevel,
-      forceDemo: demoMode,
-    });
+    try {
+      const resp = await generateFlashcardsApi({
+        topic: newTopic || 'Conceptos de Estudio',
+        textContext: newTextContext || undefined,
+        count: cardCount,
+        academicLevel,
+        model: selectedModel,
+        forceDemo: demoMode,
+      });
 
-    setIsGenerating(false);
-
-    if (resp.success && resp.data) {
-      saveDeckToStorage(resp.data);
-      const updated = [resp.data, ...decks];
-      onDecksUpdated(updated);
-      setSelectedDeckId(resp.data.id);
-      setCurrentCardIndex(0);
-      setIsFlipped(false);
-      setShowHint(false);
-      setShowNewDeckModal(false);
-      setNewTopic('');
-      setNewTextContext('');
-    } else {
-      setErrorMsg(resp.error || 'No se pudieron generar las flashcards.');
+      if (resp.success && resp.data) {
+        saveDeckToStorage(resp.data);
+        const updated = [resp.data, ...decks];
+        onDecksUpdated(updated);
+        setSelectedDeckId(resp.data.id);
+        setCurrentCardIndex(0);
+        setIsFlipped(false);
+        setShowHint(false);
+        setShowNewDeckModal(false);
+        setNewTopic('');
+        setNewTextContext('');
+      } else {
+        setErrorMsg(resp.error || 'No se pudieron generar las flashcards.');
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Error inesperado al generar las tarjetas.');
+    } finally {
+      setIsGenerating(false);
     }
   };
 
@@ -457,25 +464,67 @@ export const FlashcardsModule: React.FC<FlashcardsModuleProps> = ({
                 />
               </div>
 
-              <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">
-                  Número de tarjetas a generar
-                </label>
-                <select
-                  value={cardCount}
-                  onChange={(e) => setCardCount(Number(e.target.value))}
-                  className="w-full bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-hidden focus:border-purple-500"
-                >
-                  <option value={4}>4 tarjetas</option>
-                  <option value={6}>6 tarjetas</option>
-                  <option value={8}>8 tarjetas</option>
-                </select>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">
+                    Número de tarjetas
+                  </label>
+                  <select
+                    value={cardCount}
+                    onChange={(e) => setCardCount(Number(e.target.value))}
+                    className="w-full bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-hidden focus:border-purple-500"
+                  >
+                    <option value={4}>4 tarjetas</option>
+                    <option value={6}>6 tarjetas</option>
+                    <option value={8}>8 tarjetas</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">
+                    Modelo IA (Gratuito)
+                  </label>
+                  <select
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                    className="w-full bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-hidden focus:border-purple-500 font-medium"
+                  >
+                    <option value="gemini-3.8-flash">gemini-3.8-flash (Recomendado)</option>
+                    <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Alta disp.)</option>
+                  </select>
+                </div>
               </div>
 
               {errorMsg && (
-                <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                  <span>{errorMsg}</span>
+                <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-200 text-xs space-y-2">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
+                    <span className="leading-relaxed flex-1">{errorMsg}</span>
+                  </div>
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleGenerateDeck}
+                      disabled={isGenerating}
+                      className="px-2.5 py-1 rounded-lg bg-rose-500/30 hover:bg-rose-500/40 text-rose-100 font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Reintentar</span>
+                    </button>
+                    {selectedModel === 'gemini-3.8-flash' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedModel('gemini-3.1-flash-lite');
+                          setTimeout(() => handleGenerateDeck(), 50);
+                        }}
+                        disabled={isGenerating}
+                        className="px-2.5 py-1 rounded-lg bg-purple-500/30 hover:bg-purple-500/40 text-purple-200 font-semibold transition-colors cursor-pointer"
+                      >
+                        Probar con Flash Lite
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

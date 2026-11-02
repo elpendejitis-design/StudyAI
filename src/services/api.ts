@@ -16,7 +16,7 @@ import {
 const PREFERENCES_STORAGE_KEY = 'studyai_preferences_v1';
 const SAVED_SUMMARIES_KEY = 'studyai_saved_summaries_v1';
 const SAVED_DECKS_KEY = 'studyai_saved_decks_v1';
-const QUIZ_HISTORY_KEY = 'studyai_quiz_history_v1';
+const CLIENT_TIMEOUT_MS = 28000; // 28s client timeout
 
 // Default user preferences
 export function loadUserPreferences(): UserPreferences {
@@ -33,6 +33,7 @@ export function loadUserPreferences(): UserPreferences {
   return {
     academicLevel: 'universidad',
     demoMode: false,
+    preferredModel: 'gemini-3.8-flash',
     dailyGoalCards: 15,
     studiedToday: 8,
     studyStreakDays: 3,
@@ -93,19 +94,57 @@ export function saveDeckToStorage(deck: FlashcardDeck): void {
   localStorage.setItem(SAVED_DECKS_KEY, JSON.stringify(updated.slice(0, 20)));
 }
 
-export function updateCardInDeck(deckId: string, cardId: string, status: 'nuevo' | 'dificil' | 'repaso' | 'dominado'): void {
+export function updateCardInDeck(
+  deckId: string,
+  cardId: string,
+  status: 'nuevo' | 'dificil' | 'repaso' | 'dominado'
+): void {
   const decks = getSavedDecks();
   const deck = decks.find((d) => d.id === deckId);
   if (!deck) return;
 
-  deck.cards = deck.cards.map((c) => (c.id === cardId ? { ...c, status, lastReviewed: Date.now() } : c));
+  deck.cards = deck.cards.map((c) =>
+    c.id === cardId ? { ...c, status, lastReviewed: Date.now() } : c
+  );
   localStorage.setItem(SAVED_DECKS_KEY, JSON.stringify(decks));
 }
 
-// Server Health Check
-export async function checkServerHealth(): Promise<{ hasApiKey: boolean; model: string }> {
+// Client fetch helper with timeout guarantee
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = CLIENT_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
-    const res = await fetch('/api/study/health');
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return res;
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      const timeoutError: any = new Error('TIMEOUT_EXCEEDED');
+      timeoutError.code = 'TIMEOUT';
+      throw timeoutError;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Server Health Check
+export async function checkServerHealth(): Promise<{
+  hasApiKey: boolean;
+  model: string;
+  fallbackModel?: string;
+  availableFreeModels?: string[];
+}> {
+  try {
+    const res = await fetchWithTimeout('/api/study/health', {}, 8000);
     if (res.ok) {
       return await res.json();
     }
@@ -121,10 +160,11 @@ export async function generateSummaryApi(params: {
   level: 'sintetico' | 'intermedio' | 'detallado';
   focus: string;
   academicLevel: AcademicLevel;
+  model?: string;
   forceDemo?: boolean;
 }): Promise<ApiResponse<SummaryResult>> {
   if (params.forceDemo) {
-    await new Promise((r) => setTimeout(r, 900));
+    await new Promise((r) => setTimeout(r, 800));
     return {
       success: true,
       data: {
@@ -140,7 +180,7 @@ export async function generateSummaryApi(params: {
   }
 
   try {
-    const res = await fetch('/api/study/summarize', {
+    const res = await fetchWithTimeout('/api/study/summarize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
@@ -152,14 +192,25 @@ export async function generateSummaryApi(params: {
         success: false,
         error: json.error || 'Error en el servidor al generar el resumen',
         code: json.code,
+        canRetry: json.canRetry ?? true,
         retryAfter: json.retryAfter,
       };
     }
     return json;
   } catch (err: any) {
+    if (err?.message === 'TIMEOUT_EXCEEDED' || err?.code === 'TIMEOUT') {
+      return {
+        success: false,
+        code: 'TIMEOUT',
+        canRetry: true,
+        error:
+          'La solicitud excedió el tiempo máximo de espera (28s). La IA está tardando en procesar el texto. Puedes pulsar "Reintentar" o activar el Modo Demostración.',
+      };
+    }
     return {
       success: false,
-      error: 'No se pudo conectar con el servidor de IA. Puedes usar el Modo Demostración.',
+      canRetry: true,
+      error: 'No se pudo conectar con el servidor de IA. Puedes pulsar "Reintentar" o activar el Modo Demostración.',
       code: 'NETWORK_ERROR',
     };
   }
@@ -171,14 +222,15 @@ export async function sendTutorMessageApi(params: {
   mode: string;
   subject: string;
   academicLevel: AcademicLevel;
+  model?: string;
   forceDemo?: boolean;
 }): Promise<ApiResponse<TutorMessage>> {
   const lastUserMsg = params.messages[params.messages.length - 1]?.content || '';
 
   if (params.forceDemo) {
-    await new Promise((r) => setTimeout(r, 800));
+    await new Promise((r) => setTimeout(r, 700));
     let simulatedMarkdown = '';
-    let followUps = [
+    const followUps = [
       '¿Podrías darme un contraejemplo o caso límite?',
       '¿Cómo se aplica esto en un examen práctico?',
       '¿Qué relación tiene con el tema anterior?',
@@ -206,7 +258,7 @@ export async function sendTutorMessageApi(params: {
   }
 
   try {
-    const res = await fetch('/api/study/tutor', {
+    const res = await fetchWithTimeout('/api/study/tutor', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
@@ -218,14 +270,25 @@ export async function sendTutorMessageApi(params: {
         success: false,
         error: json.error || 'Error en el servidor del Tutor IA',
         code: json.code,
+        canRetry: json.canRetry ?? true,
         retryAfter: json.retryAfter,
       };
     }
     return json;
   } catch (err: any) {
+    if (err?.message === 'TIMEOUT_EXCEEDED' || err?.code === 'TIMEOUT') {
+      return {
+        success: false,
+        code: 'TIMEOUT',
+        canRetry: true,
+        error:
+          'El tutor tardó más de 28s en responder. Pulsa "Reintentar" o conmuta al Modo Demostración.',
+      };
+    }
     return {
       success: false,
-      error: 'No se pudo conectar con el Tutor IA. Puedes activar el Modo Demostración.',
+      canRetry: true,
+      error: 'No se pudo conectar con el Tutor IA. Puedes pulsar "Reintentar" o activar el Modo Demostración.',
       code: 'NETWORK_ERROR',
     };
   }
@@ -238,10 +301,11 @@ export async function generateQuizApi(params: {
   questionCount: number;
   difficulty: 'facil' | 'medio' | 'dificil';
   academicLevel: AcademicLevel;
+  model?: string;
   forceDemo?: boolean;
 }): Promise<ApiResponse<QuizExam>> {
   if (params.forceDemo) {
-    await new Promise((r) => setTimeout(r, 900));
+    await new Promise((r) => setTimeout(r, 800));
     return {
       success: true,
       data: {
@@ -256,7 +320,7 @@ export async function generateQuizApi(params: {
   }
 
   try {
-    const res = await fetch('/api/study/quiz', {
+    const res = await fetchWithTimeout('/api/study/quiz', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
@@ -268,13 +332,24 @@ export async function generateQuizApi(params: {
         success: false,
         error: json.error || 'Error al generar el examen',
         code: json.code,
+        canRetry: json.canRetry ?? true,
         retryAfter: json.retryAfter,
       };
     }
     return json;
   } catch (err: any) {
+    if (err?.message === 'TIMEOUT_EXCEEDED' || err?.code === 'TIMEOUT') {
+      return {
+        success: false,
+        code: 'TIMEOUT',
+        canRetry: true,
+        error:
+          'Tiempo de espera agotado (28s) al generar el examen. Pulsa "Reintentar" o activa el Modo Demostración.',
+      };
+    }
     return {
       success: false,
+      canRetry: true,
       error: 'Error de conexión con el generador de exámenes. Prueba en Modo Demostración.',
       code: 'NETWORK_ERROR',
     };
@@ -287,10 +362,11 @@ export async function generateFlashcardsApi(params: {
   textContext?: string;
   count: number;
   academicLevel: AcademicLevel;
+  model?: string;
   forceDemo?: boolean;
 }): Promise<ApiResponse<FlashcardDeck>> {
   if (params.forceDemo) {
-    await new Promise((r) => setTimeout(r, 900));
+    await new Promise((r) => setTimeout(r, 800));
     const sampleCards = DEMO_PREBUILT_DECKS[0].cards.slice(0, params.count);
     return {
       success: true,
@@ -307,7 +383,7 @@ export async function generateFlashcardsApi(params: {
   }
 
   try {
-    const res = await fetch('/api/study/flashcards', {
+    const res = await fetchWithTimeout('/api/study/flashcards', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
@@ -319,13 +395,24 @@ export async function generateFlashcardsApi(params: {
         success: false,
         error: json.error || 'Error al generar las flashcards',
         code: json.code,
+        canRetry: json.canRetry ?? true,
         retryAfter: json.retryAfter,
       };
     }
     return json;
   } catch (err: any) {
+    if (err?.message === 'TIMEOUT_EXCEEDED' || err?.code === 'TIMEOUT') {
+      return {
+        success: false,
+        code: 'TIMEOUT',
+        canRetry: true,
+        error:
+          'Tiempo de espera agotado (28s) al generar las flashcards. Pulsa "Reintentar" o activa el Modo Demostración.',
+      };
+    }
     return {
       success: false,
+      canRetry: true,
       error: 'Error de conexión al generar flashcards. Prueba en Modo Demostración.',
       code: 'NETWORK_ERROR',
     };

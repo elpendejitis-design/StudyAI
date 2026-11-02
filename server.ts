@@ -3,6 +3,13 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
+import {
+  generateContentWithRetry,
+  handleGeminiError,
+  PRIMARY_FREE_MODEL,
+  FALLBACK_FREE_MODEL,
+  VALID_FREE_MODELS,
+} from './functions/utils/geminiEdge';
 
 dotenv.config();
 
@@ -24,9 +31,6 @@ const ai = new GoogleGenAI({
     },
   },
 });
-
-// Free-tier model selection
-const FREE_TIER_MODEL = 'gemini-3.8-flash';
 
 // Simple in-memory rate limiter to protect Free Tier quotas (15-20 req/min)
 interface RateLimitRecord {
@@ -78,16 +82,24 @@ app.get('/api/study/health', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
     hasApiKey: Boolean(apiKey && apiKey.trim().length > 0),
-    model: FREE_TIER_MODEL,
+    model: PRIMARY_FREE_MODEL,
+    fallbackModel: FALLBACK_FREE_MODEL,
+    availableFreeModels: VALID_FREE_MODELS,
     rateLimitWindowSeconds: 60,
     rateLimitMax: MAX_REQUESTS_PER_WINDOW,
+    retryConfig: {
+      maxRetries: 2,
+      backoff: 'exponential_with_jitter',
+      fallbackOn503: true,
+      timeoutMs: 25000,
+    },
   });
 });
 
 // 1. Text Summarizer Endpoint
 app.post('/api/study/summarize', checkRateLimit, async (req: Request, res: Response) => {
   try {
-    const { text, level = 'intermedio', focus = 'general', academicLevel = 'universidad' } = req.body;
+    const { text, level = 'intermedio', focus = 'general', academicLevel = 'universidad', model } = req.body;
 
     if (!text || typeof text !== 'string') {
       return res.status(400).json({ success: false, error: 'Se requiere un texto para resumir.' });
@@ -117,57 +129,60 @@ Responde EXCLUSIVAMENTE en JSON que cumpla el esquema proporcionado.`;
 
     const userPrompt = `Analiza, estructura y resume el siguiente texto académico:\n\n${text}`;
 
-    const response = await ai.models.generateContent({
-      model: FREE_TIER_MODEL,
-      contents: userPrompt,
-      config: {
-        systemInstruction: systemPrompt,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            title: { type: Type.STRING, description: 'Título conciso e identificativo del tema analizado' },
-            executiveSummary: { type: Type.STRING, description: 'Resumen ejecutivo de 2 a 4 párrafos bien estructurados' },
-            keyConcepts: {
-              type: Type.ARRAY,
-              description: 'Glosario de conceptos y términos clave esenciales',
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  term: { type: Type.STRING },
-                  definition: { type: Type.STRING },
-                  importance: { type: Type.STRING, enum: ['alta', 'media', 'baja'] },
+    const { response, usedModel } = await generateContentWithRetry(
+      ai,
+      {
+        contents: userPrompt,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING, description: 'Título conciso e identificativo del tema analizado' },
+              executiveSummary: { type: Type.STRING, description: 'Resumen ejecutivo de 2 a 4 párrafos bien estructurados' },
+              keyConcepts: {
+                type: Type.ARRAY,
+                description: 'Glosario de conceptos y términos clave esenciales',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    term: { type: Type.STRING },
+                    definition: { type: Type.STRING },
+                    importance: { type: Type.STRING, enum: ['alta', 'media', 'baja'] },
+                  },
+                  required: ['term', 'definition', 'importance'],
                 },
-                required: ['term', 'definition', 'importance'],
+              },
+              structuredSections: {
+                type: Type.ARRAY,
+                description: 'Secciones temáticas ordenadas con puntos clave analíticos',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    heading: { type: Type.STRING },
+                    points: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  },
+                  required: ['heading', 'points'],
+                },
+              },
+              conclusions: {
+                type: Type.ARRAY,
+                description: 'Conclusiones y aprendizajes fundamentales',
+                items: { type: Type.STRING },
+              },
+              reflectionQuestions: {
+                type: Type.ARRAY,
+                description: 'Preguntas de reflexión o autoevaluación para afianzar el conocimiento',
+                items: { type: Type.STRING },
               },
             },
-            structuredSections: {
-              type: Type.ARRAY,
-              description: 'Secciones temáticas ordenadas con puntos clave analíticos',
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  heading: { type: Type.STRING },
-                  points: { type: Type.ARRAY, items: { type: Type.STRING } },
-                },
-                required: ['heading', 'points'],
-              },
-            },
-            conclusions: {
-              type: Type.ARRAY,
-              description: 'Conclusiones y aprendizajes fundamentales',
-              items: { type: Type.STRING },
-            },
-            reflectionQuestions: {
-              type: Type.ARRAY,
-              description: 'Preguntas de reflexión o autoevaluación para afianzar el conocimiento',
-              items: { type: Type.STRING },
-            },
+            required: ['title', 'executiveSummary', 'keyConcepts', 'structuredSections', 'conclusions', 'reflectionQuestions'],
           },
-          required: ['title', 'executiveSummary', 'keyConcepts', 'structuredSections', 'conclusions', 'reflectionQuestions'],
         },
       },
-    });
+      { preferredModel: model, maxRetries: 2, timeoutMs: 25000 }
+    );
 
     const outputText = response.text || '{}';
     const parsedData = JSON.parse(outputText);
@@ -179,27 +194,21 @@ Responde EXCLUSIVAMENTE en JSON que cumpla el esquema proporcionado.`;
         id: `summary-${Date.now()}`,
         timestamp: Date.now(),
         level,
+        usedModel,
         sourceLength: text.length,
         originalTextSnippet: text.slice(0, 150) + (text.length > 150 ? '...' : ''),
       },
     });
   } catch (error: any) {
-    console.error('Error in /api/study/summarize:', error);
-    const isQuota = error?.status === 429 || error?.message?.includes('RESOURCE_EXHAUSTED') || error?.message?.includes('429');
-    res.status(isQuota ? 429 : 500).json({
-      success: false,
-      code: isQuota ? 'RESOURCE_EXHAUSTED' : 'GENERATION_ERROR',
-      error: isQuota
-        ? 'Cuota de Gemini temporalmente alcanzada en el nivel gratuito. Activa el Modo Demostración para continuar aprendiendo sin pausas.'
-        : `Error al generar el resumen: ${error?.message || 'Error desconocido'}`,
-    });
+    const err = handleGeminiError(error);
+    res.status(err.status).json(err.body);
   }
 });
 
 // 2. Step-by-Step AI Tutor Endpoint
 app.post('/api/study/tutor', checkRateLimit, async (req: Request, res: Response) => {
   try {
-    const { messages, mode = 'paso-a-paso', subject = 'General', academicLevel = 'universidad' } = req.body;
+    const { messages, mode = 'paso-a-paso', subject = 'General', academicLevel = 'universidad', model } = req.body;
 
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ success: false, error: 'Se requiere un historial de mensajes válido.' });
@@ -249,32 +258,34 @@ Devuelve un JSON con:
 - responseMarkdown: Explicación completa en Markdown con buen uso de negritas, listas y bloques de código o fórmulas.
 - suggestedFollowUps: Array con 3 preguntas breves y atractivas de seguimiento que el alumno podría hacer a continuación.`;
 
-    // Format chat history (limit to last 6 messages to stay within free tier budget)
     const recentMessages = messages.slice(-6).map((m: any) => ({
       role: m.role === 'model' ? 'model' : 'user',
       parts: [{ text: m.content }],
     }));
 
-    const response = await ai.models.generateContent({
-      model: FREE_TIER_MODEL,
-      contents: recentMessages,
-      config: {
-        systemInstruction: systemPrompt,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            responseMarkdown: { type: Type.STRING, description: 'La respuesta pedagógica del tutor en formato Markdown' },
-            suggestedFollowUps: {
-              type: Type.ARRAY,
-              description: 'Tres preguntas breves sugeridas para continuar la conversación',
-              items: { type: Type.STRING },
+    const { response, usedModel } = await generateContentWithRetry(
+      ai,
+      {
+        contents: recentMessages,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              responseMarkdown: { type: Type.STRING, description: 'La respuesta pedagógica del tutor en formato Markdown' },
+              suggestedFollowUps: {
+                type: Type.ARRAY,
+                description: 'Tres preguntas breves sugeridas para continuar la conversación',
+                items: { type: Type.STRING },
+              },
             },
+            required: ['responseMarkdown', 'suggestedFollowUps'],
           },
-          required: ['responseMarkdown', 'suggestedFollowUps'],
         },
       },
-    });
+      { preferredModel: model, maxRetries: 2, timeoutMs: 25000 }
+    );
 
     const parsed = JSON.parse(response.text || '{}');
     res.json({
@@ -287,25 +298,19 @@ Devuelve un JSON con:
         timestamp: Date.now(),
         mode,
         subject,
+        usedModel,
       },
     });
   } catch (error: any) {
-    console.error('Error in /api/study/tutor:', error);
-    const isQuota = error?.status === 429 || error?.message?.includes('RESOURCE_EXHAUSTED') || error?.message?.includes('429');
-    res.status(isQuota ? 429 : 500).json({
-      success: false,
-      code: isQuota ? 'RESOURCE_EXHAUSTED' : 'GENERATION_ERROR',
-      error: isQuota
-        ? 'Cuota de Gemini temporalmente alcanzada en el nivel gratuito. Activa el Modo Demostración para continuar aprendiendo sin pausas.'
-        : `Error en la respuesta del tutor: ${error?.message || 'Error desconocido'}`,
-    });
+    const err = handleGeminiError(error);
+    res.status(err.status).json(err.body);
   }
 });
 
 // 3. Quiz Generator Endpoint
 app.post('/api/study/quiz', checkRateLimit, async (req: Request, res: Response) => {
   try {
-    const { topic, textContext, questionCount = 4, difficulty = 'medio', academicLevel = 'universidad' } = req.body;
+    const { topic, textContext, questionCount = 4, difficulty = 'medio', academicLevel = 'universidad', model } = req.body;
 
     if (!topic && !textContext) {
       return res.status(400).json({ success: false, error: 'Se requiere indicar un tema o texto de referencia.' });
@@ -333,40 +338,44 @@ Requisitos estrictos para cada pregunta:
 - Explicación didáctica completa explicando por qué esa opción es la correcta y qué conceptos aclara.
 - Concepto o subtema clave evaluado.`;
 
-    const response = await ai.models.generateContent({
-      model: FREE_TIER_MODEL,
-      contents: prompt,
-      config: {
-        systemInstruction: 'Eres un examinador universitario pedagógico en español. Genera pruebas rigurosas, sin ambigüedades y con explicaciones educativas exhaustivas.',
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            topic: { type: Type.STRING },
-            questions: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  id: { type: Type.STRING },
-                  question: { type: Type.STRING },
-                  options: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: 'Cuatro opciones de respuesta',
+    const { response, usedModel } = await generateContentWithRetry(
+      ai,
+      {
+        contents: prompt,
+        config: {
+          systemInstruction:
+            'Eres un examinador universitario pedagógico en español. Genera pruebas rigurosas, sin ambigüedades y con explicaciones educativas exhaustivas.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              topic: { type: Type.STRING },
+              questions: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    question: { type: Type.STRING },
+                    options: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING },
+                      description: 'Cuatro opciones de respuesta',
+                    },
+                    correctAnswerIndex: { type: Type.INTEGER, description: 'Índice de 0 a 3 de la respuesta correcta' },
+                    explanation: { type: Type.STRING, description: 'Explicación detallada de la respuesta correcta y descartes' },
+                    concept: { type: Type.STRING, description: 'Tema o concepto puntual evaluado' },
                   },
-                  correctAnswerIndex: { type: Type.INTEGER, description: 'Índice de 0 a 3 de la respuesta correcta' },
-                  explanation: { type: Type.STRING, description: 'Explicación detallada de la respuesta correcta y descartes' },
-                  concept: { type: Type.STRING, description: 'Tema o concepto puntual evaluado' },
+                  required: ['question', 'options', 'correctAnswerIndex', 'explanation', 'concept'],
                 },
-                required: ['question', 'options', 'correctAnswerIndex', 'explanation', 'concept'],
               },
             },
+            required: ['topic', 'questions'],
           },
-          required: ['topic', 'questions'],
         },
       },
-    });
+      { preferredModel: model, maxRetries: 2, timeoutMs: 25000 }
+    );
 
     const parsed = JSON.parse(response.text || '{}');
     const questionsWithIds = (parsed.questions || []).map((q: any, idx: number) => ({
@@ -380,27 +389,21 @@ Requisitos estrictos para cada pregunta:
         id: `exam-${Date.now()}`,
         topic: parsed.topic || topic,
         difficulty,
+        usedModel,
         questions: questionsWithIds,
         createdAt: Date.now(),
       },
     });
   } catch (error: any) {
-    console.error('Error in /api/study/quiz:', error);
-    const isQuota = error?.status === 429 || error?.message?.includes('RESOURCE_EXHAUSTED') || error?.message?.includes('429');
-    res.status(isQuota ? 429 : 500).json({
-      success: false,
-      code: isQuota ? 'RESOURCE_EXHAUSTED' : 'GENERATION_ERROR',
-      error: isQuota
-        ? 'Cuota de Gemini temporalmente alcanzada en el nivel gratuito. Activa el Modo Demostración para continuar aprendiendo sin pausas.'
-        : `Error al generar el examen: ${error?.message || 'Error desconocido'}`,
-    });
+    const err = handleGeminiError(error);
+    res.status(err.status).json(err.body);
   }
 });
 
 // 4. Flashcards Generator Endpoint
 app.post('/api/study/flashcards', checkRateLimit, async (req: Request, res: Response) => {
   try {
-    const { topic, textContext, count = 5, academicLevel = 'universidad' } = req.body;
+    const { topic, textContext, count = 5, academicLevel = 'universidad', model } = req.body;
 
     if (!topic && !textContext) {
       return res.status(400).json({ success: false, error: 'Se requiere indicar un tema o texto de estudio.' });
@@ -427,35 +430,39 @@ Requisitos para cada flashcard:
 - hint: Pista nemotécnica o analogía para facilitar el recuerdo.
 - tag: Categoría o concepto específico.`;
 
-    const response = await ai.models.generateContent({
-      model: FREE_TIER_MODEL,
-      contents: prompt,
-      config: {
-        systemInstruction: 'Eres un diseñador de técnicas de estudio y repetición espaciada en español. Genera flashcards concisas, de alto impacto y pedagógicamente efectivas.',
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            deckTitle: { type: Type.STRING },
-            category: { type: Type.STRING },
-            cards: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  front: { type: Type.STRING },
-                  back: { type: Type.STRING },
-                  hint: { type: Type.STRING },
-                  tag: { type: Type.STRING },
+    const { response, usedModel } = await generateContentWithRetry(
+      ai,
+      {
+        contents: prompt,
+        config: {
+          systemInstruction:
+            'Eres un diseñador de técnicas de estudio y repetición espaciada en español. Genera flashcards concisas, de alto impacto y pedagógicamente efectivas.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              deckTitle: { type: Type.STRING },
+              category: { type: Type.STRING },
+              cards: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    front: { type: Type.STRING },
+                    back: { type: Type.STRING },
+                    hint: { type: Type.STRING },
+                    tag: { type: Type.STRING },
+                  },
+                  required: ['front', 'back'],
                 },
-                required: ['front', 'back'],
               },
             },
+            required: ['deckTitle', 'cards'],
           },
-          required: ['deckTitle', 'cards'],
         },
       },
-    });
+      { preferredModel: model, maxRetries: 2, timeoutMs: 25000 }
+    );
 
     const parsed = JSON.parse(response.text || '{}');
     const cardsWithIds = (parsed.cards || []).map((c: any, idx: number) => ({
@@ -472,19 +479,13 @@ Requisitos para cada flashcard:
         description: `Mazo generado automáticamente con ${cardsWithIds.length} tarjetas de repaso activo.`,
         category: parsed.category || 'General',
         cards: cardsWithIds,
+        usedModel,
         createdAt: Date.now(),
       },
     });
   } catch (error: any) {
-    console.error('Error in /api/study/flashcards:', error);
-    const isQuota = error?.status === 429 || error?.message?.includes('RESOURCE_EXHAUSTED') || error?.message?.includes('429');
-    res.status(isQuota ? 429 : 500).json({
-      success: false,
-      code: isQuota ? 'RESOURCE_EXHAUSTED' : 'GENERATION_ERROR',
-      error: isQuota
-        ? 'Cuota de Gemini temporalmente alcanzada en el nivel gratuito. Activa el Modo Demostración para continuar aprendiendo sin pausas.'
-        : `Error al generar flashcards: ${error?.message || 'Error desconocido'}`,
-    });
+    const err = handleGeminiError(error);
+    res.status(err.status).json(err.body);
   }
 });
 

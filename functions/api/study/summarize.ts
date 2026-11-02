@@ -1,6 +1,6 @@
 import { Type } from '@google/genai';
 import { PagesFunction, Env } from '../../types';
-import { getGeminiClient, FREE_TIER_MODEL, handleGeminiError } from '../../utils/geminiEdge';
+import { getGeminiClient, generateContentWithRetry, handleGeminiError } from '../../utils/geminiEdge';
 import { checkEdgeRateLimit, createRateLimitResponse, jsonResponse } from '../../utils/rateLimiter';
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -16,7 +16,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     return jsonResponse({ success: false, error: 'Cuerpo de solicitud JSON inválido.' }, 400);
   }
 
-  const { text, level = 'intermedio', focus = 'general', academicLevel = 'universidad' } = body || {};
+  const { text, level = 'intermedio', focus = 'general', academicLevel = 'universidad', model } = body || {};
 
   if (!text || typeof text !== 'string') {
     return jsonResponse({ success: false, error: 'Se requiere un texto para resumir.' }, 400);
@@ -54,57 +54,60 @@ Responde EXCLUSIVAMENTE en JSON que cumpla el esquema proporcionado.`;
 
     const userPrompt = `Analiza, estructura y resume el siguiente texto académico:\n\n${text}`;
 
-    const response = await ai.models.generateContent({
-      model: FREE_TIER_MODEL,
-      contents: userPrompt,
-      config: {
-        systemInstruction: systemPrompt,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            title: { type: Type.STRING, description: 'Título conciso e identificativo del tema analizado' },
-            executiveSummary: { type: Type.STRING, description: 'Resumen ejecutivo de 2 a 4 párrafos bien estructurados' },
-            keyConcepts: {
-              type: Type.ARRAY,
-              description: 'Glosario de conceptos y términos clave esenciales',
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  term: { type: Type.STRING },
-                  definition: { type: Type.STRING },
-                  importance: { type: Type.STRING, enum: ['alta', 'media', 'baja'] },
+    const { response, usedModel } = await generateContentWithRetry(
+      ai,
+      {
+        contents: userPrompt,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING, description: 'Título conciso e identificativo del tema analizado' },
+              executiveSummary: { type: Type.STRING, description: 'Resumen ejecutivo de 2 a 4 párrafos bien estructurados' },
+              keyConcepts: {
+                type: Type.ARRAY,
+                description: 'Glosario de conceptos y términos clave esenciales',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    term: { type: Type.STRING },
+                    definition: { type: Type.STRING },
+                    importance: { type: Type.STRING, enum: ['alta', 'media', 'baja'] },
+                  },
+                  required: ['term', 'definition', 'importance'],
                 },
-                required: ['term', 'definition', 'importance'],
+              },
+              structuredSections: {
+                type: Type.ARRAY,
+                description: 'Secciones temáticas ordenadas con puntos clave analíticos',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    heading: { type: Type.STRING },
+                    points: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  },
+                  required: ['heading', 'points'],
+                },
+              },
+              conclusions: {
+                type: Type.ARRAY,
+                description: 'Conclusiones y aprendizajes fundamentales',
+                items: { type: Type.STRING },
+              },
+              reflectionQuestions: {
+                type: Type.ARRAY,
+                description: 'Preguntas de reflexión o autoevaluación para afianzar el conocimiento',
+                items: { type: Type.STRING },
               },
             },
-            structuredSections: {
-              type: Type.ARRAY,
-              description: 'Secciones temáticas ordenadas con puntos clave analíticos',
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  heading: { type: Type.STRING },
-                  points: { type: Type.ARRAY, items: { type: Type.STRING } },
-                },
-                required: ['heading', 'points'],
-              },
-            },
-            conclusions: {
-              type: Type.ARRAY,
-              description: 'Conclusiones y aprendizajes fundamentales',
-              items: { type: Type.STRING },
-            },
-            reflectionQuestions: {
-              type: Type.ARRAY,
-              description: 'Preguntas de reflexión o autoevaluación para afianzar el conocimiento',
-              items: { type: Type.STRING },
-            },
+            required: ['title', 'executiveSummary', 'keyConcepts', 'structuredSections', 'conclusions', 'reflectionQuestions'],
           },
-          required: ['title', 'executiveSummary', 'keyConcepts', 'structuredSections', 'conclusions', 'reflectionQuestions'],
         },
       },
-    });
+      { preferredModel: model, maxRetries: 2, timeoutMs: 25000 }
+    );
 
     const outputText = response.text || '{}';
     const parsedData = JSON.parse(outputText);
@@ -116,6 +119,7 @@ Responde EXCLUSIVAMENTE en JSON que cumpla el esquema proporcionado.`;
         id: `summary-${Date.now()}`,
         timestamp: Date.now(),
         level,
+        usedModel,
         sourceLength: text.length,
         originalTextSnippet: text.slice(0, 150) + (text.length > 150 ? '...' : ''),
       },

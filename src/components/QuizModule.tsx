@@ -50,6 +50,8 @@ export const QuizModule: React.FC<QuizModuleProps> = ({
 
   const optionLetters = ['A', 'B', 'C', 'D'];
 
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-3.8-flash');
+
   const handleGenerateExam = async () => {
     if (!topic.trim() && !textContext.trim()) {
       setErrorMsg('Por favor especifica un tema o pega un texto de estudio.');
@@ -59,25 +61,30 @@ export const QuizModule: React.FC<QuizModuleProps> = ({
     setErrorMsg(null);
     setIsLoading(true);
 
-    const resp = await generateQuizApi({
-      topic: topic || 'Conceptos de Estudio',
-      textContext: textContext || undefined,
-      questionCount,
-      difficulty,
-      academicLevel,
-      forceDemo: demoMode,
-    });
+    try {
+      const resp = await generateQuizApi({
+        topic: topic || 'Conceptos de Estudio',
+        textContext: textContext || undefined,
+        questionCount,
+        difficulty,
+        academicLevel,
+        model: selectedModel,
+        forceDemo: demoMode,
+      });
 
-    setIsLoading(false);
-
-    if (resp.success && resp.data) {
-      setActiveExam(resp.data);
-      setCurrentQuestionIndex(0);
-      setSelectedAnswers({});
-      setRevealedAnswers({});
-      setIsCompleted(false);
-    } else {
-      setErrorMsg(resp.error || 'No se pudo generar el examen.');
+      if (resp.success && resp.data) {
+        setActiveExam(resp.data);
+        setCurrentQuestionIndex(0);
+        setSelectedAnswers({});
+        setRevealedAnswers({});
+        setIsCompleted(false);
+      } else {
+        setErrorMsg(resp.error || 'No se pudo generar el examen.');
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Error inesperado al generar el examen.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -204,7 +211,7 @@ export const QuizModule: React.FC<QuizModuleProps> = ({
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label className="text-xs font-semibold text-slate-300 block mb-1.5">
                   Número de Preguntas
@@ -234,6 +241,20 @@ export const QuizModule: React.FC<QuizModuleProps> = ({
                   <option value="dificil">Difícil (Análisis fino)</option>
                 </select>
               </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1.5">
+                  Modelo IA (Nivel Gratuito)
+                </label>
+                <select
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  className="w-full bg-slate-950/80 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-slate-200 focus:outline-hidden focus:border-blue-500 font-medium"
+                >
+                  <option value="gemini-3.8-flash">gemini-3.8-flash (Recomendado)</option>
+                  <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Alta disp.)</option>
+                </select>
+              </div>
             </div>
           </div>
 
@@ -251,9 +272,35 @@ export const QuizModule: React.FC<QuizModuleProps> = ({
           </div>
 
           {errorMsg && (
-            <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>{errorMsg}</span>
+            <div className="p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-200 text-xs space-y-2">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
+                <span className="leading-relaxed flex-1">{errorMsg}</span>
+              </div>
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={handleGenerateExam}
+                  disabled={isLoading}
+                  className="px-3 py-1.5 rounded-lg bg-rose-500/30 hover:bg-rose-500/40 text-rose-100 font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reintentar ahora</span>
+                </button>
+                {selectedModel === 'gemini-3.8-flash' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedModel('gemini-3.1-flash-lite');
+                      setTimeout(() => handleGenerateExam(), 50);
+                    }}
+                    disabled={isLoading}
+                    className="px-3 py-1.5 rounded-lg bg-blue-500/30 hover:bg-blue-500/40 text-blue-200 font-semibold transition-colors cursor-pointer"
+                  >
+                    Probar con Flash Lite
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
